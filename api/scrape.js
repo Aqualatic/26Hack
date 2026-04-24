@@ -1,368 +1,248 @@
 import { createClient } from '@supabase/supabase-js'
 
-const GROQ_API_URL = 'https://api.groq.com/openai/v1/chat/completions'
-
-/* ── Helpers ─────────────────────────────────────────────────────────────── */
-
-function looksLikeUrlPath(str) {
-  // Returns true if the title is just a URL path fragment like "opportunities"
-  const urlLike = /^(opportunities?|awards?|scholarships?|programs?|index|home|about|contact|page)$/i
-  return urlLike.test(str.trim()) || str.trim().length < 4
+// ─── Detect college from URL ─────────────────────────────────────────────────
+function detectCollegeFromUrl(url) {
+  const h = new URL(url).hostname.toLowerCase()
+  if (h.includes('canadacollege') || h.includes('canada.edu')) return 'canada'
+  if (h.includes('collegeofsanmateo') || h.includes('csm.edu')) return 'csm'
+  if (h.includes('skylinecollege') || h.includes('skyline.edu')) return 'skyline'
+  return null
 }
 
-function sanitizeTitle(str) {
-  // Strip markdown links [text](url) → text
-  // Strip trailing [link] or (url) patterns
-  // Strip URLs
-  if (!str) return ''
-  return str
-    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')   // [text](url) → text
-    .replace(/\[([^\]]+)\]/g, '$1')              // [text] → text
-    .replace(/\(([^)]+)\)/g, '$1')               // (text) → text
-    .replace(/https?:\/\/\S+/g, '')              // bare URLs
-    .replace(/\s{2,}/g, ' ')
-    .trim()
+// ─── Infer college from item text ────────────────────────────────────────────
+function inferCollegeFromText(text, urlCollege) {
+  if (urlCollege) return urlCollege
+  const t = text.toLowerCase()
+  if (/skyline/.test(t)) return 'skyline'
+  if (/san mateo|\bcsm\b/.test(t)) return 'csm'
+  if (/ca[ñn]ada|\bcan\b/.test(t)) return 'canada'
+  return 'smccd'
 }
 
-function looksLikeBadExtraction(items, url) {
-  // Returns true if every item has a generic title derived from the URL path
-  if (!items || items.length === 0) return true
-  const pathPart = url.split('/').filter(Boolean).pop()?.replace(/[-_]/g, ' ').toLowerCase() || ''
-  const allBad = items.every(it => {
-    const t = (it.title || '').toLowerCase().trim()
-    return t === pathPart || t === '' || looksLikeUrlPath(it.title)
-  })
-  return allBad
-}
+// ─── Parse AcademicWorks markdown table from Jina ────────────────────────────
+// Jina renders it as: | award amount | [Name](url) | Actions |
+function parseAcademicWorksTable(markdown, sourceUrl) {
+  const now = new Date().toISOString()
+  const results = []
 
-function parseAcademicWorks(text) {
-  // Strategy: look for scholarship blocks in Jina text.
-  // AcademicWorks listings often repeat a pattern like:
-  //   Scholarship Name
-  //   $Amount
-  //   Deadline: Date
-  //   Description...
-  const scholarships = []
-  const lines = text.split('\n').map(l => l.trim()).filter(Boolean)
+  for (const line of markdown.split('\n')) {
+    const trimmed = line.trim()
+    // Must be a table row with pipes, skip header/separator rows
+    if (!trimmed.startsWith('|') || trimmed.includes('--- ') || trimmed.includes('Award |')) continue
 
-  // Heuristic: find lines that look like titles (followed by $ or Deadline)
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i]
-    // Look for dollar amounts in nearby lines as a signal this is a scholarship
-    const nextLines = lines.slice(i + 1, i + 6).join(' ')
-    const hasMoney = /\$[\d,]+/.test(nextLines)
-    const hasDeadline = /deadline|due date|closes?/i.test(nextLines)
-    const isHeading = line.length > 5 && line.length < 120 && !line.startsWith('http') && !line.startsWith('-')
+    const cells = trimmed.split('|').map(c => c.trim()).filter(Boolean)
+    if (cells.length < 2) continue
 
-    if (isHeading && (hasMoney || hasDeadline)) {
-      // Try to extract description from following lines
-      let description = ''
-      let deadline = null
-      let j = i + 1
-      while (j < lines.length && j < i + 15) {
-        const l = lines[j]
-        if (/^\$?[\d,]+/.test(l) && !description) {
-          // amount line — skip
-        } else if (/deadline|due date/i.test(l)) {
-          const dmatch = l.match(/(\d{1,2}\/\d{1,2}\/\d{2,4}|\d{4}-\d{2}-\d{2}|(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+\d{1,2},?\s+\d{4})/i)
-          if (dmatch) deadline = dmatch[1]
-        } else if (l.length > 20 && !looksLikeUrlPath(l)) {
-          description += l + ' '
-        }
-        j++
-      }
+    const awardCell = cells[0] // e.g. "Multiple awards ranging from $1,000 - $10,000"
+    const nameCell  = cells[1] // e.g. "[CSM - Rosalie O'Mahony Mathematics/CS Scholarship](https://...)"
 
-      scholarships.push({
-        title: line.replace(/^[-•*]\s*/, ''),
-        organization: 'SMCCD Academic Works',
-        deadline: deadline,
-        description: description.trim() || null,
-        type: 'scholarship',
-        college: 'smccd',
-        apply_url: null,
-      })
-    }
+    // Extract title and URL from markdown link
+    const linkMatch = nameCell.match(/\[([^\]]+)\]\(([^)]+)\)/)
+    const title = linkMatch ? linkMatch[1].trim() : nameCell.replace(/\[|\]/g, '').trim()
+    const applyUrl = linkMatch ? linkMatch[2].trim() : sourceUrl
+
+    if (!title || title.length < 3) continue
+
+    const college = inferCollegeFromText(title, null)
+
+    results.push({
+      title: title.slice(0, 200),
+      organization: 'SMCCD Scholarship Office',
+      deadline: null,
+      description: awardCell.length > 3 ? `Award: ${awardCell}`.slice(0, 300) : null,
+      type: 'scholarship',
+      college,
+      source_url: sourceUrl,
+      apply_url: applyUrl,
+      scraped_at: now,
+    })
   }
 
-  return scholarships.length > 0 ? scholarships : null
+  return results
 }
 
-function parseClubList(text, collegeName) {
-  // Strategy: look for club names in bulleted/numbered lists
-  const clubs = []
-  const lines = text.split('\n').map(l => l.trim()).filter(Boolean)
-
-  for (const line of lines) {
-    // Match bullet lines that look like club names
-    const m = line.match(/^[-•*]\s*(.+)/)
-    if (m) {
-      const name = m[1].trim()
-      if (name.length > 3 && name.length < 80 && !/^[\d\.]+$/.test(name)) {
-        clubs.push({
-          title: name,
-          organization: collegeName,
-          deadline: null,
-          description: null,
-          type: 'club',
-          college: collegeName.toLowerCase().includes('canada') ? 'canada'
-                 : collegeName.toLowerCase().includes('san mateo') ? 'csm'
-                 : collegeName.toLowerCase().includes('skyline') ? 'skyline'
-                 : 'smccd',
-          apply_url: null,
-        })
-      }
-    }
-  }
-
-  return clubs.length > 0 ? clubs : null
-}
-
-async function callGroq(apiKey, messages, model = 'llama-3.1-8b-instant') {
-  const res = await fetch(GROQ_API_URL, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${apiKey}`,
-    },
-    body: JSON.stringify({ model, temperature: 0.1, max_tokens: 2000, messages }),
-  })
-  if (!res.ok) throw new Error(await res.text())
-  const data = await res.json()
-  return data.choices[0].message.content.trim()
-}
-
-function parseJson(raw) {
-  const attempts = [
-    raw,
-    raw.replace(/```json|```/g, '').trim(),
-    '[' + raw.replace(/```json|```/g, '').trim() + ']',
-  ]
-  for (const a of attempts) {
-    try { return JSON.parse(a) } catch { continue }
-  }
-  const m = raw.match(/(\[[\s\S]*\]|\{[\s\S]*\})/s)
-  if (m) {
-    try { return JSON.parse(m[0]) } catch {
-      try { return JSON.parse('[' + m[0] + ']') } catch { }
-    }
+// ─── Repair + parse truncated JSON from Groq ─────────────────────────────────
+function parseGroqJson(raw) {
+  if (!raw) return null
+  let s = raw.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/```\s*$/i, '').trim()
+  const isArray = s.trimStart().startsWith('[')
+  const start = isArray ? s.indexOf('[') : s.indexOf('{')
+  if (start === -1) return null
+  s = s.slice(start)
+  try { return JSON.parse(s) } catch {}
+  const last = s.lastIndexOf('}')
+  if (last !== -1) {
+    try { return JSON.parse(s.slice(0, last + 1) + (isArray ? ']' : '')) } catch {}
   }
   return null
 }
 
-/* ── Main handler ────────────────────────────────────────────────────────── */
+// ─── Strip nav/footer noise ──────────────────────────────────────────────────
+const NAV_LINE_RE = [
+  /^(home|menu|search|login|log in|sign in|sign up|register|contact us|about|sitemap|skip to|back to top)\b/i,
+  /^(facebook|twitter|instagram|youtube|linkedin|tiktok|snapchat)\b/i,
+  /^(privacy policy|terms of use|accessibility|copyright|©)/i,
+  /^\s*[\|>\\/·•]\s*$/,
+  /^\d{1,2}\/\d{1,2}\/\d{2,4}$/,
+]
+const NAV_HEADINGS = [
+  'quick links', 'additional links', 'related links', 'see also',
+  'connect with us', 'follow us', 'social media', 'contact us',
+  'more information', 'footer', 'navigation', 'breadcrumb',
+]
+function cleanPage(raw) {
+  const lines = raw.split('\n')
+  let inNav = false
+  const kept = []
+  for (const line of lines) {
+    const t = line.trim()
+    if (!t) { kept.push(''); continue }
+    const lower = t.toLowerCase().replace(/[#*_]/g, '').trim()
+    if (NAV_HEADINGS.some(kw => lower.includes(kw))) { inNav = true; continue }
+    if (/^#{1,3} /.test(t) && !NAV_HEADINGS.some(kw => lower.includes(kw))) inNav = false
+    if (inNav) continue
+    if (NAV_LINE_RE.some(p => p.test(t))) continue
+    kept.push(line)
+  }
+  return kept.join('\n').replace(/\n{3,}/g, '\n\n').trim()
+}
 
 export default async function handler(req, res) {
-  if (req.method !== 'POST') {
-    return res.status(405).json({ error: 'Method not allowed' })
-  }
+  if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' })
+  if (!process.env.GROQ_API_KEY) return res.status(500).json({ error: 'GROQ_API_KEY not configured' })
+  if (!process.env.VITE_SUPABASE_URL || !process.env.SUPABASE_SERVICE_KEY)
+    return res.status(500).json({ error: 'Supabase credentials not configured' })
 
-  if (!process.env.GROQ_API_KEY) {
-    return res.status(500).json({ error: 'GROQ_API_KEY is not configured in Vercel environment variables.' })
-  }
-  if (!process.env.VITE_SUPABASE_URL || !process.env.SUPABASE_SERVICE_KEY) {
-    return res.status(500).json({ error: 'Supabase credentials are not configured. Need VITE_SUPABASE_URL and SUPABASE_SERVICE_KEY.' })
-  }
-
-  const { url, college, category } = req.body
+  const { url } = req.body
   if (!url) return res.status(400).json({ error: 'URL is required' })
 
-  const urlLower = url.toLowerCase()
-  const isAcademicWorks = urlLower.includes('academicworks.com')
-  const isCanadaClubs = urlLower.includes('canadacollege.edu') && urlLower.includes('club')
-  const isCsmClubs = (urlLower.includes('collegeofsanmateo.edu') || urlLower.includes('csm.edu')) && urlLower.includes('club')
-  const isSkylineClubs = urlLower.includes('skylinecollege.edu') && urlLower.includes('club')
+  const urlCollege = detectCollegeFromUrl(url)
+  const isAcademicWorks = new URL(url).hostname.includes('academicworks.com')
 
-  const validColleges = ['canada', 'csm', 'skyline', 'smccd']
-  const validCategories = ['internship', 'scholarship', 'club', 'event', 'other']
-
-  let pageText = ''
-
-  /* ── Step 1: Fetch page ──────────────────────────────────────────────── */
   try {
-    const jinaUrl = `https://r.jina.ai/${url}`
-    const pageRes = await fetch(jinaUrl, {
-      headers: { 'Accept': 'text/plain' },
-      signal: AbortSignal.timeout(25000),
+    // ── Step 1: Fetch via Jina ────────────────────────────────────────────
+    const jinaHeaders = {
+      Accept: 'text/plain',
+      'x-timeout': '25',
+      ...(isAcademicWorks && {
+        'x-wait-for-selector': 'table, .opportunity-card, main',
+        'x-remove-selector': 'nav, footer, header',
+      }),
+    }
+
+    const pageRes = await fetch(`https://r.jina.ai/${url}`, {
+      headers: jinaHeaders,
+      signal: AbortSignal.timeout(30000),
     })
-    if (!pageRes.ok) {
-      return res.status(400).json({ error: `Could not fetch that page (HTTP ${pageRes.status}). Try a different URL.` })
-    }
-    pageText = await pageRes.text()
-  } catch (fetchErr) {
-    return res.status(400).json({ error: `Could not reach that URL: ${fetchErr.message}` })
-  }
+    if (!pageRes.ok) return res.status(400).json({ error: `Could not fetch page (HTTP ${pageRes.status})` })
 
-  const stripped = pageText.trim().slice(0, 8000)
-  let extracted = null
+    const rawText = await pageRes.text()
+    console.log('[scrape] Jina length:', rawText.length, '| sample:', rawText.slice(0, 200))
 
-  /* ── Step 2A: Site-specific regex parsers (no AI) ───────────────────── */
-  if (isAcademicWorks) {
-    extracted = parseAcademicWorks(stripped)
-  } else if (isCanadaClubs) {
-    extracted = parseClubList(stripped, 'Cañada College')
-  } else if (isCsmClubs) {
-    extracted = parseClubList(stripped, 'College of San Mateo')
-  } else if (isSkylineClubs) {
-    extracted = parseClubList(stripped, 'Skyline College')
-  }
-
-  /* ── Step 2B: AI extraction (if regex didn't work) ──────────────────── */
-  if (!extracted) {
-  const systemPrompt = `You extract student resources (scholarships, internships, clubs, events) from web pages.
-Return ONLY a JSON array — no markdown, no explanation.
-
-Schema per item:
-{
-  "title": "short name of the opportunity",
-  "organization": "who runs it",
-  "deadline": "YYYY-MM-DD or null",
-  "description": "1 sentence about what it is",
-  "type": "scholarship | internship | club | event | other",
-  "college": "canada | csm | skyline | smccd"
-}
-
-Rules:
-- IGNORE navigation links, "Welcome", "Home", "About", "Contact", login links, menu items, footer links, privacy policy, terms of use.
-- IGNORE items that are not real opportunities (no generic page sections).
-- Title must be the human-readable name ONLY. No URLs in brackets. No markdown links. Just the plain name.
-- type="scholarship" for financial aid / Academic Works.
-- type="club" for student organizations.
-- type="internship" for jobs/work experience.
-- college="smccd" for district-wide / Academic Works.
-- college from URL domain if known.
-- Return [] if nothing real is found. Never wrap in markdown fences.`
-
-    try {
-      const raw = await callGroq(process.env.GROQ_API_KEY, [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: `Source URL: ${url}\n\nPage content:\n${stripped}` },
-      ])
-      extracted = parseJson(raw)
-    } catch (aiErr) {
-      console.error('AI extraction failed:', aiErr.message)
-    }
-  }
-
-  /* ── Step 2C: Retry with better prompt if extraction looks bad ──────── */
-  if (looksLikeBadExtraction(extracted, url)) {
-    console.log('First extraction looked bad, retrying with stricter prompt...')
-    const retryPrompt = `Extract real student opportunities from the page below.
-Return ONLY a JSON array.
-
-Schema per item:
-{
-  "title": "just the name, no links, no brackets",
-  "organization": "who offers it",
-  "deadline": "YYYY-MM-DD or null",
-  "description": "1 sentence",
-  "type": "scholarship | internship | club | event | other",
-  "college": "canada | csm | skyline | smccd"
-}
-
-Rules:
-- Skip: Welcome, Home, About, Contact, login, privacy, terms, nav links, footer links.
-- Title must be plain text only. No markdown. No [brackets]. No URLs.
-- Each item needs its own real name from the page content.
-- Academic Works = scholarship + smccd.
-- Return [] if nothing real is found.`
-
-    try {
-      const raw = await callGroq(process.env.GROQ_API_KEY, [
-        { role: 'system', content: retryPrompt },
-        { role: 'user', content: `Source URL: ${url}\n\nPage content:\n${stripped}` },
-      ], 'llama-3.3-70b-versatile') // stronger model for retry
-      extracted = parseJson(raw)
-    } catch (aiErr) {
-      console.error('Retry AI extraction failed:', aiErr.message)
-    }
-  }
-
-  /* ── Step 3: Fallback ───────────────────────────────────────────────── */
-  if (!extracted) {
-    extracted = {
-      title: url.split('/').filter(Boolean).pop().replace(/-/g, ' ') || 'Resource',
-      organization: new URL(url).hostname.replace('www.', ''),
-      deadline: null,
-      description: 'Resource found at ' + url,
-      type: category || 'other',
-      apply_url: url,
-    }
-  }
-
-  /* ── Step 4: Normalize and validate ─────────────────────────────────── */
-  let items = Array.isArray(extracted) ? extracted : [extracted]
-  items = items.filter(item => item && item.title)
-
-  if (items.length === 0) {
-    return res.status(400).json({ error: 'Could not extract any resources from that page. Try a different URL.' })
-  }
-
-  const now = new Date().toISOString()
-  const today = new Date().toISOString().split('T')[0]
-
-  const enriched = items.map((item) => {
-    let detectedCollege = item.college || college || 'smccd'
-
-    // URL-based overrides
-    if (isAcademicWorks) detectedCollege = 'smccd'
-    else if (isCanadaClubs) detectedCollege = 'canada'
-    else if (isCsmClubs) detectedCollege = 'csm'
-    else if (isSkylineClubs) detectedCollege = 'skyline'
-    else if (urlLower.includes('collegeofsanmateo.edu') || urlLower.includes('csm.edu')) detectedCollege = 'csm'
-    else if (urlLower.includes('skylinecollege.edu')) detectedCollege = 'skyline'
-    else if (urlLower.includes('canadacollege.edu')) detectedCollege = 'canada'
-
-    if (!validColleges.includes(detectedCollege)) detectedCollege = 'smccd'
-
-    let detectedType = item.type || category || 'other'
-    if (isAcademicWorks) detectedType = 'scholarship'
-    else if (isCanadaClubs || isCsmClubs || isSkylineClubs || urlLower.includes('/club') || urlLower.includes('/clubs')) detectedType = 'club'
-    if (!validCategories.includes(detectedType)) detectedType = 'other'
-
-    // Clean up titles — strip markdown links, brackets, URLs
-    let cleanTitle = sanitizeTitle(item.title || 'Untitled Resource')
-    if (looksLikeUrlPath(cleanTitle)) {
-      cleanTitle = isAcademicWorks ? 'SMCCD Scholarship Opportunity'
-        : isCanadaClubs ? 'Cañada College Club'
-        : isCsmClubs ? 'CSM Club'
-        : isSkylineClubs ? 'Skyline College Club'
-        : 'Resource from ' + new URL(url).hostname.replace('www.', '')
+    if (rawText.trim().length < 100) {
+      return res.status(400).json({ error: 'Page returned too little content — it may require login or is JavaScript-only.' })
     }
 
-    // Filter past deadlines
-    let filteredDeadline = null
-    if (item.deadline && item.deadline.match(/^\d{4}-\d{2}-\d{2}$/)) {
-      if (item.deadline >= today) filteredDeadline = item.deadline
+    // ── AcademicWorks: parse the markdown table directly, no Groq needed ──
+    if (isAcademicWorks) {
+      const enriched = parseAcademicWorksTable(rawText, url)
+      console.log('[scrape] AcademicWorks parsed:', enriched.length, 'scholarships')
+
+      if (enriched.length === 0) {
+        return res.status(400).json({ error: 'Could not find scholarship table in page. The page layout may have changed.' })
+      }
+
+      const supabase = createClient(process.env.VITE_SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY)
+      const { data: inserted, error: dbError } = await supabase.from('resources').insert(enriched).select()
+      if (dbError) return res.status(500).json({ error: `Database error: ${dbError.message}` })
+      return res.status(200).json({ success: true, data: inserted })
     }
 
-    return {
-      title: cleanTitle,
-      organization: item.organization || null,
-      deadline: filteredDeadline,
-      description: item.description || null,
-      type: detectedType,
-      college: detectedCollege,
-      category: detectedType,
-      source_url: url,
-      apply_url: item.apply_url || url,
-      scraped_at: now,
+    // ── Standard flow: Jina text → Groq ──────────────────────────────────
+    const text = cleanPage(rawText).slice(0, 6000)
+
+    const groqRes = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${process.env.GROQ_API_KEY}` },
+      body: JSON.stringify({
+        model: 'llama-3.1-8b-instant',
+        temperature: 0.1,
+        max_tokens: 2500,
+        messages: [
+          {
+            role: 'system',
+            content: `Extract real student resources from a community college page. Return ONLY raw JSON — no prose, no markdown fences.
+
+EXTRACT: named clubs/orgs, scholarships, internships, academic support programs (EOPS, DSPS, tutoring, transfer center), campus services (food pantry, health center, CalWORKs), events with real details.
+
+SKIP: nav links, Home/About/Contact/Login, social media, footers, breadcrumbs, staff directories, generic headings with no content, duplicates.
+
+Multiple resources → JSON array. One resource → JSON object. None → {"error":"no_resources"}
+
+Each item: {"title":"exact name","organization":"who runs it","deadline":null,"description":"1 short sentence","type":"club|scholarship|internship|event|other","college":"canada|csm|skyline|smccd","apply_url":"https://..."}
+
+Keep descriptions SHORT (1 sentence). title = specific item name not page title. deadline = YYYY-MM-DD only if a real future date is stated, else null. college: look for keywords — 'skyline'→skyline, 'san mateo' or 'CSM'→csm, 'cañada' or 'canada'→canada, district-wide or unclear→smccd.`,
+          },
+          { role: 'user', content: `URL: ${url}\n\nPage content:\n${text}` },
+        ],
+      }),
+    })
+
+    if (!groqRes.ok) {
+      const errText = await groqRes.text()
+      return res.status(500).json({ error: `Groq API error (${groqRes.status}): ${errText}` })
     }
-  })
 
-  /* ── Step 5: Insert into Supabase ───────────────────────────────────── */
-  const supabase = createClient(
-    process.env.VITE_SUPABASE_URL,
-    process.env.SUPABASE_SERVICE_KEY
-  )
+    const groqData = await groqRes.json()
+    const choice = groqData.choices?.[0]
+    const rawContent = choice?.message?.content?.trim() ?? ''
 
-  const { data: inserted, error: dbError } = await supabase
-    .from('resources')
-    .insert(enriched)
-    .select()
+    console.log('[scrape] finish_reason:', choice?.finish_reason)
+    console.log('[scrape] Groq tail:', rawContent.slice(-200))
 
-  if (dbError) {
-    return res.status(500).json({ error: `Database error: ${dbError.message}` })
+    if (choice?.finish_reason === 'length') {
+      return res.status(400).json({ error: 'AI response cut off — too many items. Try a more specific page URL.' })
+    }
+
+    const extracted = parseGroqJson(rawContent)
+    if (!extracted) {
+      console.error('[scrape] Parse failed. Raw:\n', rawContent)
+      return res.status(400).json({ error: 'Could not parse AI response.', debug: rawContent.slice(0, 600) })
+    }
+    if (extracted?.error === 'no_resources') {
+      return res.status(400).json({ error: 'No real student resources found on this page.' })
+    }
+
+    const today = new Date().toISOString().split('T')[0]
+    const now = new Date().toISOString()
+    const VALID_TYPES = ['internship', 'scholarship', 'club', 'event', 'other']
+
+    const enriched = (Array.isArray(extracted) ? extracted : [extracted])
+      .filter(item => item?.title && typeof item.title === 'string' && item.title.trim().length > 2)
+      .map(item => ({
+        title: item.title.trim().slice(0, 200),
+        organization: item.organization?.trim() || null,
+        deadline: item.deadline && item.deadline >= today ? item.deadline : null,
+        description: item.description?.trim() || null,
+        type: VALID_TYPES.includes(item.type) ? item.type : 'other',
+        college: inferCollegeFromText([item.title, item.description, item.organization].filter(Boolean).join(' '), urlCollege),
+        source_url: url,
+        apply_url: item.apply_url || url,
+        scraped_at: now,
+      }))
+
+    if (enriched.length === 0) {
+      return res.status(400).json({ error: 'No valid resources could be extracted from this page.' })
+    }
+
+    const supabase = createClient(process.env.VITE_SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY)
+    const { data: inserted, error: dbError } = await supabase.from('resources').insert(enriched).select()
+    if (dbError) return res.status(500).json({ error: `Database error: ${dbError.message}` })
+
+    return res.status(200).json({ success: true, data: inserted })
+
+  } catch (err) {
+    console.error('[scrape] Unhandled error:', err)
+    return res.status(500).json({ error: err.message })
   }
-
-  return res.status(200).json({ success: true, data: inserted })
 }
