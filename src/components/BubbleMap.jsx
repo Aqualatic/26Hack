@@ -7,7 +7,7 @@ import { FILTER_CATEGORIES } from '../lib/constants'
 const COLLEGE_LABELS = {
   canada: 'Cañada College', csm: 'College of San Mateo', skyline: 'Skyline College',
 }
-const COLLEGE_ABBR  = { canada: 'CA', csm: 'CSM', skyline: 'SKY' }
+const COLLEGE_ABBR  = { canada: 'CAN', csm: 'CSM', skyline: 'Sky' }
 const COLLEGE_COLOR = { canada: '#4ade80', csm: '#60a5fa', skyline: '#fb923c' }
 
 // ─── Category colours ─────────────────────────────────────────────────────────
@@ -143,12 +143,19 @@ function buildGraph(resources, t) {
       r: 38, hasLink, majors,
     })
 
-    // Home connection: school if known, else SMCCD
-    // If resource has multiple colleges or unknown college, connect to SMCCD
-    const homeId = validColleges.has(r.college)
-      ? `school-${r.college}`
-      : 'dist-smccd'
-    edges.push({ from: resNode.id, to: homeId, kind: 'school' })
+    // Home connection(s)
+    // - If college is a specific school → connect to that school
+    // - If college is 'smccd' (district-wide) → connect to ALL three schools
+    // - If unknown → connect to district node
+    if (r.college === 'smccd') {
+      schoolCols.forEach(col => {
+        edges.push({ from: resNode.id, to: `school-${col}`, kind: 'school' })
+      })
+    } else if (validColleges.has(r.college)) {
+      edges.push({ from: resNode.id, to: `school-${r.college}`, kind: 'school' })
+    } else {
+      edges.push({ from: resNode.id, to: 'dist-smccd', kind: 'school' })
+    }
 
     // Category node
     const catId = `cat-${cat}`
@@ -198,12 +205,15 @@ function simulate(nodes, edges) {
   const resourceNodes = nodes.filter(n => n.type === 'resource')
   const resourcesByParent = {}
   resourceNodes.forEach(n => {
-    const homeEdge = edges.find(e =>
+    const homeEdges = edges.filter(e =>
       e.kind === 'school' &&
       ((e.from === n.id && nm[e.to]) || (e.to === n.id && nm[e.from]))
     )
-    const parentId = homeEdge
-      ? (homeEdge.from === n.id ? homeEdge.to : homeEdge.from)
+    // If resource connects to multiple schools (district-wide), seed near center
+    const isMultiSchool = homeEdges.length > 1
+    const parentId = isMultiSchool ? 'dist-smccd' :
+      homeEdges.length === 1 ?
+        (homeEdges[0].from === n.id ? homeEdges[0].to : homeEdges[0].from)
       : 'dist-smccd'
     if (!resourcesByParent[parentId]) resourcesByParent[parentId] = []
     resourcesByParent[parentId].push({ node: n, parentId })
@@ -969,7 +979,7 @@ export function BubbleMap({ resources, searchQuery }) {
                 <text x={n.x} y={n.y + n.r + 14} textAnchor="middle"
                   fill={t.legendText} fontSize="9.5" fontFamily="'Outfit', sans-serif"
                   style={{ pointerEvents: 'none' }}
-                >{n.label.split(' ')[0]}</text>
+                >{n.abbr}</text>
               </g>
             )
           })}

@@ -1,7 +1,7 @@
 export const COLLEGES = {
   canada: {
     label: 'Cañada College',
-    abbr: 'CA',
+    abbr: 'CAN',
     color: '#4ade80',
     dim: '#1a3d25',
   },
@@ -13,7 +13,7 @@ export const COLLEGES = {
   },
   skyline: {
     label: 'Skyline College',
-    abbr: 'SKY',
+    abbr: 'Sky',
     color: '#fb923c',
     dim: '#3d2010',
   },
