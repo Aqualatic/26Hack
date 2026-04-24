@@ -2,23 +2,6 @@ import { createClient } from '@supabase/supabase-js'
 
 const GROQ_API_URL = 'https://api.groq.com/openai/v1/chat/completions'
 
-// Helper: check whether a title actually appears in the page text (anti-hallucination)
-function isTitleInText(title, text) {
-  if (!title || !text) return false
-  const normalize = (s) => s.toLowerCase().replace(/[^\w\s]/g, ' ').replace(/\s+/g, ' ').trim()
-  const t = normalize(title)
-  const txt = normalize(text)
-
-  // Exact match
-  if (txt.includes(t)) return true
-
-  // Word-based fallback for slight rephrasing
-  const titleWords = t.split(' ').filter((w) => w.length > 2)
-  if (titleWords.length === 0) return false
-  const matched = titleWords.filter((w) => txt.includes(w)).length
-  return matched / titleWords.length >= 0.6
-}
-
 export default async function handler(req, res) {
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method not allowed' })
@@ -31,20 +14,14 @@ export default async function handler(req, res) {
     return res.status(500).json({ error: 'Supabase credentials are not configured. Need VITE_SUPABASE_URL and SUPABASE_SERVICE_KEY.' })
   }
 
-  const { url } = req.body
+  const { url, college, category } = req.body
 
   if (!url) {
     return res.status(400).json({ error: 'URL is required' })
   }
 
-  // Force lambda isolation to prevent context leakage between requests
-  res.setHeader('Cache-Control', 'no-store, max-age=0, must-revalidate')
-  res.setHeader('Vercel-CDN-Cache-Control', 'no-store')
-  res.setHeader('Pragma', 'no-cache')
-  res.setHeader('Expires', '0')
-
-  // AI will auto-detect all fields. No hints, no fallbacks.
-  const validColleges = ['canada', 'csm', 'skyline']
+  // College and category are now optional - AI will auto-detect them
+  const validColleges = ['canada', 'csm', 'skyline', 'smccd']
   const validCategories = ['internship', 'scholarship', 'club', 'event', 'other']
 
   try {
@@ -77,29 +54,22 @@ export default async function handler(req, res) {
         model: 'llama-3.1-8b-instant',
         temperature: 0.1,
         max_tokens: 2000,
-        stream: false,
         messages: [
           {
             role: 'system',
-            content: `You are a strict data extractor for a student resource directory at SMCCD community colleges (Cañada College, College of San Mateo, Skyline College).
+            content: `You are a data extractor for a student resource directory at SMCCD community colleges (Cañada College, College of San Mateo, Skyline College).
 Extract resource info from the page text and return ONLY valid JSON — no explanation, no markdown fences, nothing else.
 
-STRICT RULES — FOLLOW EXACTLY:
-- Extract ONLY resources that are explicitly mentioned in the provided page text.
-- NEVER invent, hallucinate, or infer resources that are not literally present in the text.
-- NEVER use information from other pages, previous requests, or your training data.
-- Use exact titles and organization names as they appear in the text. Do not rephrase.
-- If you cannot find something, set it to null. Do not guess.
-- Do NOT use any external knowledge or hints.
+IMPORTANT: Auto-detect the college and category from the page content. Do NOT use any user-provided hints.
 
 Use this schema for each resource:
 {
-  "title": "exact name of the resource as it appears on the page",
-  "organization": "exact name of who offers it, as it appears on the page",
+  "title": "name of the resource or opportunity",
+  "organization": "who offers it",
   "deadline": "YYYY-MM-DD or null",
-  "description": "2-3 sentences about what this is and who it helps, based ONLY on the page text",
+  "description": "2-3 sentences about what this is and who it helps",
   "type": "internship | scholarship | club | event | other",
-  "college": "canada | csm | skyline (use csm if it applies to all colleges, is district-wide, or is unclear)",
+  "college": "canada | csm | skyline | smccd (use smccd if it applies to all colleges or is district-wide)",
   "apply_url": "direct application URL or source URL"
 }
 
@@ -107,8 +77,8 @@ Rules for college detection:
 - If the page mentions "Cañada" or "Canada College", use "canada"
 - If the page mentions "College of San Mateo" or "CSM", use "csm"  
 - If the page mentions "Skyline College", use "skyline"
-- If the page mentions multiple colleges or is about SMCCD district-wide resources, use "csm"
-- If unclear, use "csm" as the default
+- If the page mentions multiple colleges or is about SMCCD district-wide resources, use "smccd"
+- If unclear, use "smccd" as the default
 
 Rules for type detection:
 - internship: Work experience, co-op, paid/unpaid positions
@@ -130,7 +100,7 @@ Special handling for job boards (Indeed, LinkedIn, etc.):
 - If no specific deadline, set to null
 
 If the page lists multiple resources return a JSON array of the above.
-If you cannot find specific resources return ONE entry with the page heading or site name as the title, and a brief factual description of what the page contains.
+If you cannot find specific resources return one entry summarizing what the page offers.
 Always return valid JSON. Never return plain text.`,
           },
           {
@@ -182,30 +152,14 @@ Always return valid JSON. Never return plain text.`,
         organization: new URL(url).hostname.replace('www.', ''),
         deadline: null,
         description: 'Resource found at ' + url,
-        type: 'other',
+        type: category,
         apply_url: url,
       }
     }
 
     // Step 4: Normalize and validate
     const items = Array.isArray(extracted) ? extracted : [extracted]
-    let validItems = items.filter(item => item && item.title)
-
-    // Anti-hallucination: replace any item whose title does not appear in the page text
-    validItems = validItems.map((item) => {
-      if (isTitleInText(item.title, stripped)) {
-        return item
-      }
-      console.warn('Hallucinated title detected, replacing with fallback:', item.title)
-      return {
-        title: url.split('/').filter(Boolean).pop().replace(/-/g, ' ') || 'Resource',
-        organization: new URL(url).hostname.replace('www.', ''),
-        deadline: null,
-        description: 'Resource found at ' + url,
-        type: 'other',
-        apply_url: url,
-      }
-    })
+    const validItems = items.filter(item => item && item.title)
 
     if (validItems.length === 0) {
       return res.status(400).json({ error: 'Could not extract any resources from that page. Try a different URL.' })
@@ -215,24 +169,16 @@ Always return valid JSON. Never return plain text.`,
     const today = new Date().toISOString().split('T')[0] // YYYY-MM-DD format
     
     const enriched = validItems.map((item) => {
-      let detectedCollege = (item.college || 'csm').toString().toLowerCase().trim()
-
-      // Normalize full names and variations to short codes
-      if (detectedCollege.includes('cañada') || detectedCollege.includes('canada college')) {
-        detectedCollege = 'canada'
-      } else if (detectedCollege.includes('college of san mateo')) {
-        detectedCollege = 'csm'
-      } else if (detectedCollege.includes('skyline')) {
-        detectedCollege = 'skyline'
-      } else if (detectedCollege.includes('smccd') || detectedCollege.includes('district')) {
-        detectedCollege = 'csm'
+      // Auto-detect college from AI response, fallback to user hint or default
+      let detectedCollege = item.college || college || 'csm'
+      // Map smccd to a valid college (default to CSM as the largest)
+      // The bubble map will handle showing it under SMCCD district
+      if (detectedCollege === 'smccd' || !validColleges.includes(detectedCollege)) {
+        detectedCollege = 'csm'  // Default to CSM for district-wide resources
       }
 
-      if (!validColleges.includes(detectedCollege)) {
-        detectedCollege = 'csm'
-      }
-
-      let detectedType = item.type || 'other'
+      // Auto-detect type from AI response, fallback to user hint or other
+      let detectedType = item.type || category || 'other'
       if (!validCategories.includes(detectedType)) {
         detectedType = 'other'
       }

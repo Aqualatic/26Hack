@@ -59,8 +59,8 @@ export const themeColors = {
 
     schoolDim: {
       canada: '#1a3d25',
-      csm: '#1a254a',
-      skyline: '#3d1515',
+      csm: '#1a2d4a',
+      skyline: '#3d2010',
     },
     majorDim: '#3d2700',
   },
@@ -123,9 +123,9 @@ export const themeColors = {
     resourceTextNoLink: 'rgba(26,26,22,0.7)',
 
     schoolDim: {
-      canada: '#e8f5ef',
-      csm: '#e9ecf5',
-      skyline: '#fceaea',
+      canada: '#e8f5e9',
+      csm: '#e3f2fd',
+      skyline: '#fff3e0',
     },
     majorDim: '#fff8e1',
   },

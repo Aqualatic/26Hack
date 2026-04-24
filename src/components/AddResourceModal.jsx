@@ -1,73 +1,198 @@
 import { useState } from 'react'
+import { useTheme } from '../hooks/useTheme.jsx'
+import { themeColors } from '../lib/theme'
+import { supabase } from '../lib/supabase'
 
 export function AddResourceModal({ onClose, onAdded }) {
-  const [url, setUrl] = useState('')
-  const [status, setStatus] = useState(null)
-  const [msg, setMsg] = useState('')
+  const { theme } = useTheme()
+  const t = themeColors[theme]
 
-  async function submit() {
+  const [url, setUrl] = useState('')
+  const [status, setStatus] = useState(null) // null | 'loading' | 'success' | 'error'
+  const [statusMsg, setStatusMsg] = useState('')
+
+  async function handleSubmit() {
     if (!url.trim()) return
     setStatus('loading')
-    setMsg('AI is analyzing the page…')
+    setStatusMsg('AI is analyzing the page — auto-detecting college, category, and extracting resources…')
+
     try {
-      const res = await fetch('/api/scrape', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url }) })
-      let err = 'Scrape failed'
+      // Call your Vercel serverless function
+      // AI auto-detects college and category from page content
+      const res = await fetch('/api/scrape', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url }),
+      })
+
       if (!res.ok) {
-        try { const j = await res.json(); err = j.error || err } catch { try { const txt = await res.text(); err = txt || `Server ${res.status}` } catch {} }
-        throw new Error(err)
+        let errMsg = 'Scrape failed'
+        try {
+          const err = await res.json()
+          errMsg = err.error || errMsg
+        } catch {
+          // If response isn't JSON, get text
+          try {
+            const text = await res.text()
+            errMsg = text || `Server returned ${res.status}`
+          } catch {
+            errMsg = `Server returned ${res.status}`
+          }
+        }
+        throw new Error(errMsg)
       }
-      const { data } = await res.json()
-      if (Array.isArray(data)) { data.forEach(onAdded); setMsg(`Added ${data.length} resource${data.length > 1 ? 's' : ''}`) }
-      else { onAdded(data); setMsg('Added resource') }
-      setStatus('success')
+
+      let responseData
+      try {
+        responseData = await res.json()
+      } catch {
+        throw new Error('Server returned invalid JSON')
+      }
+
+      const { data } = responseData
+
+      // The API already inserted into Supabase, just notify the parent
+      if (Array.isArray(data)) {
+        data.forEach(onAdded)
+        setStatus('success')
+        setStatusMsg(`✓ Added ${data.length} resource${data.length > 1 ? 's' : ''} to the tree!`)
+      } else {
+        onAdded(data)
+        setStatus('success')
+        setStatusMsg('✓ Added resource to the tree!')
+      }
       setTimeout(onClose, 1800)
-    } catch (e) {
+
+    } catch (err) {
       setStatus('error')
-      setMsg(e.message)
+      setStatusMsg(err.message)
     }
   }
 
-  const statusBg = status === 'error' ? 'rgba(239,68,68,0.10)' : status === 'success' ? 'rgba(34,197,94,0.10)' : 'var(--surface)'
-  const statusColor = status === 'error' ? '#ef4444' : status === 'success' ? '#16a34a' : 'var(--muted)'
+  const inputStyle = {
+    width: '100%',
+    padding: '12px 16px',
+    background: t.appBg,
+    border: `1px solid ${t.borderMedium}`,
+    borderRadius: 12,
+    fontFamily: "'Outfit', sans-serif",
+    fontSize: 14,
+    color: t.inputText,
+    outline: 'none',
+    transition: 'border-color 0.2s',
+    boxSizing: 'border-box',
+  }
+  const labelStyle = {
+    display: 'block',
+    fontSize: 11,
+    fontWeight: 600,
+    letterSpacing: '0.06em',
+    textTransform: 'uppercase',
+    color: t.secondaryText,
+    marginBottom: 6,
+  }
 
   return (
-    <div className="modal-overlay" onClick={e => e.target === e.currentTarget && onClose()}>
-      <div className="modal-card" style={{ background: 'var(--surface)', border: '1px solid var(--border)' }}>
-        <h2 className="modal-title" style={{ color: 'var(--fg)' }}>Add a resource</h2>
-        <p className="modal-subtitle" style={{ color: 'var(--muted)' }}>
+    <div
+      onClick={(e) => e.target === e.currentTarget && onClose()}
+      style={{
+        position: 'fixed', inset: 0,
+        background: t.overlayLight,
+        zIndex: 300,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        padding: 16,
+      }}
+    >
+      <div style={{
+        background: t.elevatedBg,
+        border: `1px solid ${t.borderLight}`,
+        borderRadius: 20,
+        padding: '32px 28px',
+        width: '100%',
+        maxWidth: 420,
+      }}>
+        <h2 style={{ fontFamily: "'DM Serif Display', serif", fontSize: 22, fontWeight: 400, marginBottom: 6, color: t.appText }}>
+          Add a resource
+        </h2>
+        <p style={{ fontSize: 13, color: t.secondaryText, marginBottom: 24, lineHeight: 1.5 }}>
           Drop a link — AI scrapes, cleans, and places it in the tree.
         </p>
 
         <div style={{ marginBottom: 16 }}>
-          <label className="modal-label">URL</label>
+          <label style={labelStyle}>URL</label>
           <input
-            className="modal-input"
+            style={inputStyle}
             type="url"
             placeholder="https://example.com/opportunity"
             value={url}
-            onChange={e => setUrl(e.target.value)}
+            onChange={(e) => setUrl(e.target.value)}
           />
         </div>
 
-        <div className="modal-info" style={{ background: 'var(--input-bg)' }}>
-          <p>AI will auto-detect the college and category from the page.</p>
+        <div style={{
+          padding: '10px 14px',
+          background: t.warningBg,
+          border: `1px solid ${t.warningBorder}`,
+          borderRadius: 10,
+          marginBottom: 24,
+        }}>
+          <p style={{ fontSize: 11, color: t.detailDesc, lineHeight: 1.5, margin: 0 }}>
+            ✨ AI will auto-detect the college (Cañada / CSM / Skyline / SMCCD) and category (internship / scholarship / club / event) from the page.
+          </p>
         </div>
 
-        <div className="modal-actions">
-          <button className="btn btn-ghost" onClick={onClose}>Cancel</button>
+        <div style={{ display: 'flex', gap: 10 }}>
           <button
-            className="btn btn-primary"
-            onClick={submit}
-            disabled={status === 'loading' || status === 'success'}
-            style={{ flex: 1.5, opacity: status === 'loading' || status === 'success' ? 0.6 : 1 }}
+            onClick={onClose}
+            style={{
+              flex: 1, padding: '12px 16px',
+              border: `1px solid ${t.borderMedium}`,
+              borderRadius: 12,
+              background: 'transparent',
+              fontFamily: "'Outfit', sans-serif",
+              fontSize: 14,
+              fontWeight: 500,
+              cursor: 'pointer',
+              color: t.secondaryText,
+              transition: 'background 0.2s',
+            }}
           >
-            {status === 'loading' ? 'Scraping…' : status === 'success' ? 'Done' : 'Scrape & place'}
+            Cancel
+          </button>
+          <button
+            onClick={handleSubmit}
+            disabled={status === 'loading' || status === 'success'}
+            style={{
+              flex: 1.5, padding: '12px 16px',
+              border: 'none',
+              borderRadius: 12,
+              background: t.buttonBg,
+              color: t.buttonText,
+              fontFamily: "'Outfit', sans-serif",
+              fontSize: 14,
+              fontWeight: 600,
+              cursor: status === 'loading' ? 'not-allowed' : 'pointer',
+              opacity: status === 'loading' || status === 'success' ? 0.5 : 1,
+              transition: 'opacity 0.2s',
+            }}
+          >
+            {status === 'loading' ? 'Scraping…' : status === 'success' ? 'Done!' : 'Scrape & place'}
           </button>
         </div>
 
         {status && (
-          <div className="modal-status" style={{ background: statusBg, color: statusColor }}>
-            {msg}
+          <div style={{
+            marginTop: 16,
+            padding: '10px 14px',
+            borderRadius: 10,
+            fontSize: 12,
+            textAlign: 'center',
+            background: status === 'error' ? t.errorBg : status === 'success' ? t.successBg : t.elevatedBg,
+            color: status === 'error' ? t.errorText : status === 'success' ? t.successText : t.secondaryText,
+          }}>
+            {statusMsg}
           </div>
         )}
       </div>
